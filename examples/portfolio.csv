@@ -1,0 +1,4 @@
+client,domain,hosts,notes
+Acme Ltd,example.com,example.com www.example.com,main marketing site
+Acme Ltd,example.net,,redirect to the main site
+Beta GmbH,example.org,www.example.org,client-facing portal
