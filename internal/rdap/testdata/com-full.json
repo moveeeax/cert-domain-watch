@@ -1,0 +1,38 @@
+{
+  "objectClassName": "domain",
+  "handle": "2336799_DOMAIN_COM-VRSN",
+  "ldhName": "EXAMPLE.COM",
+  "status": [
+    "client delete prohibited",
+    "client transfer prohibited",
+    "client update prohibited"
+  ],
+  "events": [
+    { "eventAction": "registration", "eventDate": "1995-08-14T04:00:00Z" },
+    { "eventAction": "expiration", "eventDate": "2026-08-13T04:00:00Z" },
+    { "eventAction": "last changed", "eventDate": "2025-08-14T07:01:38Z" },
+    { "eventAction": "last update of RDAP database", "eventDate": "2026-03-01T09:12:00Z" }
+  ],
+  "nameservers": [
+    { "objectClassName": "nameserver", "ldhName": "NS2.EXAMPLE-DNS.NET" },
+    { "objectClassName": "nameserver", "ldhName": "NS1.EXAMPLE-DNS.NET" }
+  ],
+  "entities": [
+    {
+      "objectClassName": "entity",
+      "handle": "9999",
+      "roles": ["registrar"],
+      "publicIds": [
+        { "type": "IANA Registrar ID", "identifier": "9999" }
+      ],
+      "vcardArray": [
+        "vcard",
+        [
+          ["version", {}, "text", "4.0"],
+          ["fn", {}, "text", "Example Registrar, Inc."]
+        ]
+      ]
+    }
+  ],
+  "rdapConformance": ["rdap_level_0", "icann_rdap_response_profile_0"]
+}

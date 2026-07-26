@@ -1,0 +1,27 @@
+{
+  "objectClassName": "domain",
+  "handle": "3110001_DOMAIN_NET-VRSN",
+  "ldhName": "EXAMPLE.NET",
+  "status": ["active"],
+  "events": [
+    { "eventAction": "registration", "eventDate": "2019-04-01T00:00:00Z" },
+    { "eventAction": "expiration", "eventDate": "2026-03-20T00:00:00Z" }
+  ],
+  "nameservers": [
+    { "objectClassName": "nameserver", "ldhName": "NS1.EXAMPLE-DNS.NET" }
+  ],
+  "entities": [
+    {
+      "objectClassName": "entity",
+      "roles": ["registrar"],
+      "handle": "1234",
+      "vcardArray": [
+        "vcard",
+        [
+          ["version", {}, "text", "4.0"],
+          ["fn", {}, "text", "Placeholder Registrar Ltd"]
+        ]
+      ]
+    }
+  ]
+}

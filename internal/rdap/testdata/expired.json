@@ -1,0 +1,10 @@
+{
+  "objectClassName": "domain",
+  "handle": "4400002_DOMAIN_ORG",
+  "ldhName": "EXPIRED.EXAMPLE.ORG",
+  "status": ["client hold", "pending delete"],
+  "events": [
+    { "eventAction": "registration", "eventDate": "2015-01-05T00:00:00Z" },
+    { "eventAction": "expiration", "eventDate": "2026-02-01T00:00:00Z" }
+  ]
+}

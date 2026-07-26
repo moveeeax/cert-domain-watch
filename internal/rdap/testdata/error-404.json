@@ -1,0 +1,6 @@
+{
+  "errorCode": 404,
+  "title": "Not Found",
+  "description": ["The domain you are looking for does not exist."],
+  "rdapConformance": ["rdap_level_0"]
+}

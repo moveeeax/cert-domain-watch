@@ -1,0 +1,13 @@
+{
+  "objectClassName": "domain",
+  "handle": "EXAMPLE.DE",
+  "ldhName": "example.de",
+  "events": [
+    { "eventAction": "last changed", "eventDate": "2024-11-02T10:44:15Z" }
+  ],
+  "nameservers": [
+    { "objectClassName": "nameserver", "ldhName": "ns1.example-dns.de" },
+    { "objectClassName": "nameserver", "ldhName": "ns2.example-dns.de" }
+  ],
+  "rdapConformance": ["rdap_level_0"]
+}
