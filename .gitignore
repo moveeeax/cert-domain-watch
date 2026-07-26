@@ -1,0 +1,30 @@
+# Build output
+/bin/
+/dist/
+/cdw
+*.exe
+*.test
+
+# Go tooling
+*.out
+coverage.txt
+vendor/
+
+# Runtime state and generated reports — these contain a customer's portfolio
+# and must never be committed to a public repo.
+state.json
+*.state.json
+/reports/
+audit-*.md
+/portfolio.csv
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
