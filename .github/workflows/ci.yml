@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # The whole suite runs offline against fixtures and generated
+      # certificates; no registry, no network, no credentials.
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build release binary
+        run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" -o bin/cdw ./cmd/cdw
+
+      - name: Smoke test the binary
+        run: |
+          ./bin/cdw version
+          ./bin/cdw coverage
