@@ -224,3 +224,7 @@ go vet ./...
 
 CI builds, vets, checks formatting and runs the suite with `-race` on every
 push.
+
+## License
+
+[MIT](LICENSE)
