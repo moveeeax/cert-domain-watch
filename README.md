@@ -56,7 +56,7 @@ cdw coverage
 
 ## Install
 
-Requires Go 1.23 or newer.
+Requires Go 1.26 or newer.
 
 ```sh
 go install github.com/moveeeax/cert-domain-watch/cmd/cdw@latest
