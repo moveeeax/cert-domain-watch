@@ -56,7 +56,7 @@ cdw coverage
 
 ## Install
 
-Requires Go 1.23 or newer.
+Requires Go 1.26 or newer.
 
 ```sh
 go install github.com/moveeeax/cert-domain-watch/cmd/cdw@latest
@@ -224,3 +224,7 @@ go vet ./...
 
 CI builds, vets, checks formatting and runs the suite with `-race` on every
 push.
+
+## License
+
+[MIT](LICENSE)
