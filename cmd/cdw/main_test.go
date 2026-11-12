@@ -210,6 +210,193 @@ func TestRunCheckSignalsCriticalFindings(t *testing.T) {
 	}
 }
 
+// writePortfolio writes a two-client CSV and returns its path.
+func writePortfolio(t *testing.T, dir string) string {
+	t.Helper()
+	csv := filepath.Join(dir, "portfolio.csv")
+	body := "client,domain\nAcme Ltd,example.com\nBeta GmbH,beispiel.com\nBeta GmbH,beispiel.net\n"
+	if err := os.WriteFile(csv, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return csv
+}
+
+// Each client's file must stand on its own: forwarding Acme's report must not
+// leak a single line about Beta.
+func TestRunCheckSplitByClientMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "reports")
+
+	err := run([]string{
+		"check", "-no-tls", "-format", "markdown", "-agency", "Northbound Digital",
+		"-rdap-url", stubServer(t), "-file", writePortfolio(t, dir),
+		"-split-by-client", "-out", outDir,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "acme-ltd.md,beta-gmbh.md" {
+		t.Fatalf("files = %v, want acme-ltd.md and beta-gmbh.md", names)
+	}
+
+	acme := readFile(t, filepath.Join(outDir, "acme-ltd.md"))
+	for _, want := range []string{"# Domain & certificate audit — Acme Ltd", "Prepared by Northbound Digital", "example.com", "## Summary"} {
+		if !strings.Contains(acme, want) {
+			t.Errorf("acme report is missing %q:\n%s", want, acme)
+		}
+	}
+	for _, leak := range []string{"Beta GmbH", "beispiel"} {
+		if strings.Contains(acme, leak) {
+			t.Errorf("acme report leaks %q:\n%s", leak, acme)
+		}
+	}
+	beta := readFile(t, filepath.Join(outDir, "beta-gmbh.md"))
+	if strings.Contains(beta, "Acme") || !strings.Contains(beta, "beispiel.net") {
+		t.Errorf("beta report has the wrong domains:\n%s", beta)
+	}
+}
+
+func TestRunCheckSplitByClientJSON(t *testing.T) {
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "reports")
+	err := run([]string{
+		"check", "-no-tls", "-format", "json", "-rdap-url", stubServer(t),
+		"-file", writePortfolio(t, dir), "-split-by-client", "-out", outDir,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var beta []struct {
+		Client string `json:"client"`
+		Domain string `json:"domain"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(outDir, "beta-gmbh.json"))), &beta); err != nil {
+		t.Fatal(err)
+	}
+	if len(beta) != 2 || beta[0].Domain != "beispiel.com" || beta[1].Domain != "beispiel.net" {
+		t.Fatalf("beta-gmbh.json = %+v, want its two domains in input order", beta)
+	}
+	for _, r := range beta {
+		if r.Client != "Beta GmbH" {
+			t.Errorf("beta-gmbh.json contains a result for %q", r.Client)
+		}
+	}
+}
+
+// The exit code covers the whole run even when output is split, so cron still
+// sees a critical in any one client.
+func TestRunCheckSplitExitCodeCoversWholeRun(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rdap+json")
+		if strings.HasSuffix(r.URL.Path, "/beispiel.net") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errorCode":404,"title":"Not Found"}`))
+			return
+		}
+		_, _ = w.Write([]byte(rdapStub))
+	}))
+	defer srv.Close()
+
+	err := run([]string{"check", "-no-tls", "-format", "markdown", "-rdap-url", srv.URL,
+		"-file", writePortfolio(t, dir), "-split-by-client", "-out", filepath.Join(dir, "reports")})
+	if !errors.Is(err, errFindings) {
+		t.Fatalf("err = %v, want errFindings", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "reports", "acme-ltd.md")); statErr != nil {
+		t.Errorf("reports must still be written when findings are critical: %v", statErr)
+	}
+}
+
+func TestRunCheckClientFilter(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "acme.md")
+	err := run([]string{
+		"check", "-no-tls", "-format", "markdown", "-rdap-url", stubServer(t),
+		"-file", writePortfolio(t, dir), "-client", "acme ltd", "-out", out,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := readFile(t, out)
+	if !strings.Contains(got, "# Domain & certificate audit — Acme Ltd") {
+		t.Errorf("a filtered report should be titled with the client's name as written:\n%s", got)
+	}
+	if strings.Contains(got, "beispiel") {
+		t.Errorf("filtered report contains another client's domain:\n%s", got)
+	}
+
+	err = run([]string{"check", "-no-tls", "-no-rdap", "-file", writePortfolio(t, dir), "-client", "Nobody"})
+	if err == nil || !strings.Contains(err.Error(), "no domains for client") {
+		t.Fatalf("err = %v, want a no-such-client error", err)
+	}
+
+	// Two clients that differ only in case are distinct in the portfolio; a
+	// case-insensitive filter must not quietly merge them into one report.
+	mixed := filepath.Join(dir, "mixed.csv")
+	if err := os.WriteFile(mixed, []byte("client,domain\nAcme,a.example.com\nACME,b.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"check", "-no-tls", "-no-rdap", "-file", mixed, "-client", "acme"})
+	if err == nil || !strings.Contains(err.Error(), "several clients") {
+		t.Fatalf("err = %v, want an ambiguous-client error", err)
+	}
+}
+
+func TestRunCheckFlagValidation(t *testing.T) {
+	err := run([]string{"check", "-no-tls", "-no-rdap", "-split-by-client", "example.com"})
+	if err == nil || !strings.Contains(err.Error(), "-out") {
+		t.Errorf("err = %v, want -split-by-client to require -out", err)
+	}
+	err = run([]string{"check", "-no-tls", "-no-rdap", "-parallel", "0", "example.com"})
+	if err == nil || !strings.Contains(err.Error(), "-parallel") {
+		t.Errorf("err = %v, want a -parallel error", err)
+	}
+}
+
+// Results come back in input order however the workers interleave, so two
+// runs over the same portfolio produce the same file.
+func TestRunCheckParallelKeepsInputOrder(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.json")
+	domains := []string{"a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com"}
+	args := append([]string{"check", "-no-tls", "-format", "json", "-parallel", "3",
+		"-rdap-url", stubServer(t), "-out", out}, domains...)
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var results []struct {
+		Domain string `json:"domain"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, out)), &results); err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range results {
+		if r.Domain != domains[i] {
+			t.Fatalf("result %d = %s, want %s", i, r.Domain, domains[i])
+		}
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestRunCoverage(t *testing.T) {
 	if err := run([]string{"coverage"}); err != nil {
 		t.Fatalf("coverage: %v", err)

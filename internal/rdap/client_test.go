@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -159,6 +160,75 @@ func TestThrottleSpacesRequests(t *testing.T) {
 	// Three lookups means two enforced gaps.
 	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
 		t.Fatalf("three lookups took %v, want at least 80ms of throttling", elapsed)
+	}
+}
+
+// A concurrent run must never put more than MaxPerHost lookups in flight
+// against one registry, however many workers are asking.
+func TestLookupCapsInFlightPerHost(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	c, closeSrv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/rdap+json")
+		_, _ = w.Write(mustFixture(t, "com-full.json"))
+	}))
+	defer closeSrv()
+	c.MaxPerHost = 2
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Lookup(context.Background(), "example.com", refTime); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("lookup: %v", err)
+	}
+	if peak > 2 {
+		t.Fatalf("peak in-flight requests = %d, want at most 2", peak)
+	}
+	if peak < 2 {
+		t.Fatalf("peak in-flight requests = %d; the cap should still allow 2 at once", peak)
+	}
+}
+
+// A lookup waiting for a slot must give up when the run is cancelled rather
+// than hang past the -timeout.
+func TestLookupWaitingForSlotHonoursContext(t *testing.T) {
+	release := make(chan struct{})
+	c, closeSrv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		_, _ = w.Write(mustFixture(t, "com-full.json"))
+	}))
+	defer closeSrv()
+	defer close(release)
+	c.MaxPerHost = 1
+
+	go func() { _, _ = c.Lookup(context.Background(), "example.com", refTime) }()
+	time.Sleep(20 * time.Millisecond) // let the first lookup take the only slot
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err := c.Lookup(ctx, "example.com", refTime)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
 }
 

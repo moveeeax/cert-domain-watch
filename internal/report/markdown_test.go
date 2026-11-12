@@ -115,8 +115,32 @@ func sample() []watch.Result {
 
 func TestMarkdownGolden(t *testing.T) {
 	got := Markdown(sample(), Options{Agency: "Northbound Digital", GeneratedAt: refTime})
+	checkGolden(t, "audit.golden.md", got)
+}
 
-	golden := filepath.Join("testdata", "audit.golden.md")
+// A single-client report is the file an account manager forwards. It carries
+// its own summary and coverage notes and nothing about any other client.
+func TestMarkdownSingleClientGolden(t *testing.T) {
+	got := Markdown(sample(), Options{Agency: "Northbound Digital", GeneratedAt: refTime, Client: "Beta GmbH"})
+	checkGolden(t, "client-beta-gmbh.golden.md", got)
+
+	for _, leak := range []string{"Acme Ltd", "example.com", "Example Registrar"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("Beta GmbH's report mentions %q, which belongs to another client", leak)
+		}
+	}
+}
+
+func TestMarkdownSingleClientWithNoDomains(t *testing.T) {
+	out := Markdown(sample(), Options{GeneratedAt: refTime, Client: "Nobody Ltd"})
+	if !strings.Contains(out, "No domains were checked.") || strings.Contains(out, "Acme") {
+		t.Errorf("unexpected output for a client with no domains:\n%s", out)
+	}
+}
+
+func checkGolden(t *testing.T, name, got string) {
+	t.Helper()
+	golden := filepath.Join("testdata", name)
 	if *update {
 		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
 			t.Fatal(err)

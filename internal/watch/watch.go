@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moveeeax/cert-domain-watch/internal/finding"
@@ -103,6 +104,54 @@ func (c *Checker) Check(ctx context.Context, t Target, now time.Time) Result {
 	finding.SortBySeverity(res.Findings)
 	res.Severity = finding.Worst(res.Findings)
 	return res
+}
+
+// DefaultParallel is how many targets CheckAll works on at once by default.
+const DefaultParallel = 8
+
+// CheckAll checks every target with up to parallel checks in flight and
+// returns the results in input order, so output stays the same from run to run
+// however the work interleaves. One dead host costs a worker its dial timeout
+// instead of holding up the whole portfolio.
+//
+// progress, if not nil, is called after each target finishes with the number
+// done so far and the total. Calls are serialised.
+func (c *Checker) CheckAll(ctx context.Context, targets []Target, now time.Time, parallel int, progress func(done, total int)) []Result {
+	if parallel < 1 {
+		parallel = 1
+	}
+	if parallel > len(targets) {
+		parallel = len(targets)
+	}
+	results := make([]Result, len(targets))
+	next := make(chan int)
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		done int
+	)
+	for w := 0; w < parallel; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				results[i] = c.Check(ctx, targets[i], now)
+				if progress != nil {
+					mu.Lock()
+					done++
+					progress(done, len(targets))
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for i := range targets {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	return results
 }
 
 func rdapErrorFinding(domain string, err error) finding.Finding {

@@ -40,24 +40,25 @@ func (f *Fetcher) Fetch(ctx context.Context, host string) ([]*x509.Certificate, 
 		host, port = h, p
 	}
 
-	d := &net.Dialer{Timeout: f.Timeout}
-	conn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(host, port), &tls.Config{
-		ServerName: host,
-		//nolint:gosec // G402: chain is analysed by Analyze, see doc comment above.
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS10,
-	})
+	// DialContext ties both the TCP dial and the handshake to ctx, so a run
+	// that hits its -timeout stops waiting on dead hosts at once instead of
+	// after each one's full dial timeout.
+	d := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: f.Timeout},
+		Config: &tls.Config{
+			ServerName: host,
+			//nolint:gosec // G402: chain is analysed by Analyze, see doc comment above.
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS10,
+		},
+	}
+	nc, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		return nil, err
 	}
+	conn := nc.(*tls.Conn)
 	defer conn.Close()
 
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
-	}
-	if err := conn.HandshakeContext(ctx); err != nil {
-		return nil, err
-	}
 	return conn.ConnectionState().PeerCertificates, nil
 }
 
