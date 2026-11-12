@@ -26,7 +26,11 @@ var ErrNoService = errors.New("no rdap service for this tld")
 // maxBody caps the response we are willing to read from a registry.
 const maxBody = 4 << 20
 
-// Client performs RDAP domain lookups.
+// DefaultMaxPerHost is how many lookups may be in flight to one RDAP server at
+// once when checks run concurrently.
+const DefaultMaxPerHost = 2
+
+// Client performs RDAP domain lookups. It is safe for concurrent use.
 type Client struct {
 	BaseURL   string
 	HTTP      *http.Client
@@ -34,9 +38,14 @@ type Client struct {
 	// MinInterval throttles consecutive lookups. Registries rate-limit
 	// aggressively and an agency portfolio run is a burst of hundreds.
 	MinInterval time.Duration
+	// MaxPerHost caps concurrent requests to any one RDAP server, counting
+	// the bootstrap redirector and each registry separately. Zero or less
+	// means no cap.
+	MaxPerHost int
 
-	mu   sync.Mutex
-	last time.Time
+	mu      sync.Mutex
+	last    time.Time
+	limiter *hostLimiter
 }
 
 // NewClient returns a Client pointed at the public bootstrap redirector.
@@ -46,6 +55,7 @@ func NewClient() *Client {
 		HTTP:        &http.Client{Timeout: 15 * time.Second},
 		UserAgent:   "cert-domain-watch/0.1 (+https://github.com/moveeeax/cert-domain-watch)",
 		MinInterval: 250 * time.Millisecond,
+		MaxPerHost:  DefaultMaxPerHost,
 	}
 }
 
@@ -74,11 +84,7 @@ func (c *Client) Lookup(ctx context.Context, domain string, now time.Time) (*Dom
 		req.Header.Set("User-Agent", c.UserAgent)
 	}
 
-	client := c.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +143,28 @@ func isRDAPBody(contentType string, body []byte) bool {
 		return false
 	}
 	return probe.ErrorCode != 0 || probe.ObjectClassName != ""
+}
+
+// httpClient returns the configured HTTP client, with the per-host limiter in
+// front of its transport when MaxPerHost is set. The limiter is built on first
+// use and shared across calls so the cap holds for the whole run; set HTTP and
+// MaxPerHost before the first Lookup.
+func (c *Client) httpClient() *http.Client {
+	base := c.HTTP
+	if base == nil {
+		base = http.DefaultClient
+	}
+	if c.MaxPerHost <= 0 {
+		return base
+	}
+	c.mu.Lock()
+	if c.limiter == nil {
+		c.limiter = &hostLimiter{next: base.Transport, max: c.MaxPerHost}
+	}
+	limited := *base
+	limited.Transport = c.limiter
+	c.mu.Unlock()
+	return &limited
 }
 
 func (c *Client) throttle(ctx context.Context) error {

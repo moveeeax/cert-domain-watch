@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -77,7 +78,10 @@ func runCheck(args []string) error {
 		file      = fs.String("file", "", "portfolio file: CSV (client,domain,hosts,notes) or one domain per line")
 		format    = fs.String("format", "text", "output format: text, json or markdown")
 		agency    = fs.String("agency", "", "agency name for the markdown report header")
-		out       = fs.String("out", "", "write output to this file instead of stdout")
+		out       = fs.String("out", "", "write output to this file instead of stdout; with -split-by-client, a directory")
+		client    = fs.String("client", "", "check and report only this client's domains (case-insensitive)")
+		split     = fs.Bool("split-by-client", false, "write one report per client into the -out directory, named <client-slug>.<ext>")
+		parallel  = fs.Int("parallel", watch.DefaultParallel, "number of domains checked at once")
 		statePath = fs.String("state", "", "state file for alert dedup and nameserver drift; only new alerts are reported")
 		dryRun    = fs.Bool("dry-run", false, "with -state, report new alerts without recording them")
 		skipTLS   = fs.Bool("no-tls", false, "skip certificate checks")
@@ -93,6 +97,16 @@ func runCheck(args []string) error {
 		return err
 	}
 
+	if _, err := extension(*format); err != nil {
+		return err
+	}
+	if *split && *out == "" {
+		return errors.New("-split-by-client needs -out set to a directory")
+	}
+	if *parallel < 1 {
+		return errors.New("-parallel must be at least 1")
+	}
+
 	targets, err := collectTargets(*file, fs.Args())
 	if err != nil {
 		return err
@@ -100,11 +114,18 @@ func runCheck(args []string) error {
 	if len(targets) == 0 {
 		return errors.New("no domains given; pass domains as arguments or use -file")
 	}
+	clientName := ""
+	if *client != "" {
+		targets, clientName, err = filterClient(targets, *client)
+		if err != nil {
+			return err
+		}
+	}
 
-	client := rdap.NewClient()
-	client.BaseURL = *rdapBase
+	rdapClient := rdap.NewClient()
+	rdapClient.BaseURL = *rdapBase
 	checker := &watch.Checker{
-		RDAP:     client,
+		RDAP:     rdapClient,
 		TLS:      tlscheck.NewFetcher(),
 		SkipTLS:  *skipTLS,
 		SkipRDAP: *skipRDAP,
@@ -116,10 +137,16 @@ func runCheck(args []string) error {
 	defer cancelTimeout()
 
 	now := time.Now().UTC()
-	results := make([]watch.Result, 0, len(targets))
-	for _, t := range targets {
-		results = append(results, checker.Check(ctx, t, now))
+	var progress func(done, total int)
+	if isTerminal(os.Stderr) {
+		progress = func(done, total int) {
+			fmt.Fprintf(os.Stderr, "\rchecked %d/%d domain(s)", done, total)
+			if done == total {
+				fmt.Fprintln(os.Stderr)
+			}
+		}
 	}
+	results := checker.CheckAll(ctx, targets, now, *parallel, progress)
 
 	if *statePath != "" {
 		results, err = applyState(*statePath, results, *dryRun)
@@ -128,17 +155,23 @@ func runCheck(args []string) error {
 		}
 	}
 
-	rendered, err := render(results, *format, *agency, now)
-	if err != nil {
-		return err
-	}
-	if *out != "" {
-		if err := os.WriteFile(*out, []byte(rendered), 0o644); err != nil {
+	if *split {
+		if err := writeSplit(*out, results, *format, *agency, now); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
 	} else {
-		fmt.Print(rendered)
+		rendered, err := render(results, *format, *agency, clientName, now)
+		if err != nil {
+			return err
+		}
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(rendered), 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
+		} else {
+			fmt.Print(rendered)
+		}
 	}
 
 	for _, r := range results {
@@ -189,7 +222,91 @@ func collectTargets(file string, args []string) ([]watch.Target, error) {
 	return targets, nil
 }
 
-func render(results []watch.Result, format, agency string, now time.Time) (string, error) {
+// filterClient keeps the targets of one client. The match ignores case so a
+// cron line does not break on "acme ltd", but it must resolve to exactly one
+// client as written in the portfolio: that name heads the report.
+func filterClient(targets []watch.Target, want string) ([]watch.Target, string, error) {
+	want = strings.TrimSpace(want)
+	var (
+		kept  []watch.Target
+		names []string
+	)
+	for _, t := range targets {
+		if !strings.EqualFold(t.Client, want) {
+			continue
+		}
+		kept = append(kept, t)
+		names = appendUnique(names, t.Client)
+	}
+	switch len(names) {
+	case 0:
+		return nil, "", fmt.Errorf("no domains for client %q in the portfolio", want)
+	case 1:
+		return kept, names[0], nil
+	default:
+		return nil, "", fmt.Errorf("client %q matches several clients (%s); use the exact name",
+			want, strings.Join(names, ", "))
+	}
+}
+
+func appendUnique(list []string, s string) []string {
+	for _, v := range list {
+		if v == s {
+			return list
+		}
+	}
+	return append(list, s)
+}
+
+// writeSplit writes one file per client into dir, each rendered on its own so
+// it carries only that client's domains, summary and coverage notes.
+func writeSplit(dir string, results []watch.Result, format, agency string, now time.Time) error {
+	groups, err := report.SplitByClient(results)
+	if err != nil {
+		return err
+	}
+	ext, err := extension(format)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, g := range groups {
+		rendered, err := render(g.Results, format, agency, g.Client, now)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(dir, g.Slug+ext)
+		if err := os.WriteFile(path, []byte(rendered), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "wrote %s\n", path)
+	}
+	return nil
+}
+
+// extension maps an output format onto the file extension used by
+// -split-by-client, and rejects unknown formats before any check runs.
+func extension(format string) (string, error) {
+	switch format {
+	case "json":
+		return ".json", nil
+	case "markdown", "md":
+		return ".md", nil
+	case "text", "":
+		return ".txt", nil
+	default:
+		return "", fmt.Errorf("unknown format %q (want text, json or markdown)", format)
+	}
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+func render(results []watch.Result, format, agency, client string, now time.Time) (string, error) {
 	switch format {
 	case "json":
 		b, err := json.MarshalIndent(results, "", "  ")
@@ -198,7 +315,7 @@ func render(results []watch.Result, format, agency string, now time.Time) (strin
 		}
 		return string(b) + "\n", nil
 	case "markdown", "md":
-		return report.Markdown(results, report.Options{Agency: agency, GeneratedAt: now}), nil
+		return report.Markdown(results, report.Options{Agency: agency, GeneratedAt: now, Client: client}), nil
 	case "text", "":
 		return renderText(results), nil
 	default:

@@ -132,6 +132,31 @@ cdw check -file examples/portfolio.csv -format markdown -agency "Northbound Digi
 ...
 ```
 
+That single document covers every client of the agency, so it is for internal
+use. To get files that can go to a client, write one report per client:
+
+```sh
+cdw check -file portfolio.csv -format markdown -agency "Northbound Digital" \
+  -split-by-client -out reports/
+```
+
+This writes `reports/acme-ltd.md`, `reports/beta-gmbh.md` and so on, one per
+client, each titled with the client's name and carrying only that client's
+domains, summary and coverage notes. The file name is the client name in lower
+case with every run of punctuation and spaces turned into one hyphen; two
+clients whose names reduce to the same file name stop the run instead of being
+merged. With `-format json` the files are `.json`, with `-format text` `.txt`.
+The exit code still reflects the whole run.
+
+To check and report a single client, filter the run:
+
+```sh
+cdw check -file portfolio.csv -format markdown -client "Acme Ltd" -out acme.md
+```
+
+`-client` matches the name case-insensitively and only that client's domains
+are checked.
+
 The import file is a CSV of `client,domain,hosts,notes`, or just a pasted list
 of domains one per line. Column names are matched in any order and any case; see
 [`examples/`](examples/). Every domain belongs to exactly one client, and a
@@ -164,6 +189,19 @@ baseline. Add `-dry-run` to preview alerts without recording them.
 
 The state file contains a customer's portfolio, and is git-ignored.
 
+### Concurrency
+
+Domains are checked eight at a time by default (`-parallel`), so a few dead
+hosts, each holding a 10-second dial timeout, no longer push the tail of a
+portfolio past the run's `-timeout`. Output is put back into input order, so the
+same portfolio gives the same file regardless of which check finished first.
+
+Registries are not hit harder because of it: RDAP lookups are still started at
+most one per 250 ms across the whole run, and at most two are in flight to any
+one RDAP server at a time (the bootstrap redirector and each registry are
+counted separately). When stderr is a terminal, `cdw` prints a
+`checked N/M domain(s)` progress line there; under cron it prints nothing.
+
 ### Flags
 
 ```
@@ -171,7 +209,11 @@ cdw check [flags] [domain ...]
   -file      portfolio file: CSV or one domain per line
   -format    text (default), json or markdown
   -agency    agency name for the markdown report header
-  -out       write to a file instead of stdout
+  -out       write to a file instead of stdout; with -split-by-client, a directory
+  -client    check and report only this client's domains
+  -split-by-client
+             write one report per client into the -out directory
+  -parallel  number of domains checked at once (default 8)
   -state     state file for alert dedup and nameserver drift
   -dry-run   with -state, report new alerts without recording them
   -no-tls    skip certificate checks

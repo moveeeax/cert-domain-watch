@@ -2,6 +2,8 @@ package watch
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -236,5 +238,94 @@ func TestEffectiveHosts(t *testing.T) {
 	explicit := Target{Domain: "example.com", Hosts: []string{"api.example.com"}}
 	if got := explicit.EffectiveHosts(); len(got) != 1 || got[0] != "api.example.com" {
 		t.Errorf("explicit hosts = %v", got)
+	}
+}
+
+// slowTLS takes longer for earlier hosts, so with several workers the results
+// finish in roughly reverse order. It records the peak number of checks in
+// flight.
+type slowTLS struct {
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+}
+
+func (s *slowTLS) Check(_ context.Context, host string, _ time.Time) tlscheck.Result {
+	s.mu.Lock()
+	s.inFlight++
+	if s.inFlight > s.peak {
+		s.peak = s.inFlight
+	}
+	s.mu.Unlock()
+
+	var n int
+	_, _ = fmt.Sscanf(host, "d%d.example.com", &n)
+	time.Sleep(time.Duration(12-n) * 2 * time.Millisecond)
+
+	s.mu.Lock()
+	s.inFlight--
+	s.mu.Unlock()
+	return tlscheck.Result{Host: host, Checked: true}
+}
+
+func TestCheckAllKeepsInputOrder(t *testing.T) {
+	tls := &slowTLS{}
+	c := &Checker{TLS: tls, SkipRDAP: true}
+
+	var targets []Target
+	for i := 0; i < 12; i++ {
+		d := fmt.Sprintf("d%d.example.com", i)
+		targets = append(targets, Target{Client: "Acme", Domain: d, Hosts: []string{d}})
+	}
+
+	var calls []int
+	results := c.CheckAll(context.Background(), targets, refTime, 4, func(done, total int) {
+		if total != len(targets) {
+			t.Errorf("progress total = %d, want %d", total, len(targets))
+		}
+		calls = append(calls, done)
+	})
+
+	if len(results) != len(targets) {
+		t.Fatalf("got %d results, want %d", len(results), len(targets))
+	}
+	for i, r := range results {
+		if r.Domain != targets[i].Domain {
+			t.Errorf("result %d is %s, want %s: output must follow input order", i, r.Domain, targets[i].Domain)
+		}
+	}
+	if tls.peak > 4 {
+		t.Errorf("peak concurrent checks = %d, want at most 4", tls.peak)
+	}
+	if tls.peak < 2 {
+		t.Errorf("peak concurrent checks = %d; targets were not checked in parallel", tls.peak)
+	}
+	for i, d := range calls {
+		if d != i+1 {
+			t.Fatalf("progress calls = %v, want 1..%d in order", calls, len(targets))
+		}
+	}
+	if len(calls) != len(targets) {
+		t.Errorf("progress called %d time(s), want %d", len(calls), len(targets))
+	}
+}
+
+func TestCheckAllSequentialAndEmpty(t *testing.T) {
+	tls := &slowTLS{}
+	c := &Checker{TLS: tls, SkipRDAP: true}
+	targets := []Target{
+		{Domain: "d1.example.com", Hosts: []string{"d1.example.com"}},
+		{Domain: "d2.example.com", Hosts: []string{"d2.example.com"}},
+	}
+	results := c.CheckAll(context.Background(), targets, refTime, 0, nil)
+	if len(results) != 2 || results[0].Domain != "d1.example.com" {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+	if tls.peak != 1 {
+		t.Errorf("parallel below 1 should run one at a time, peak = %d", tls.peak)
+	}
+
+	if got := c.CheckAll(context.Background(), nil, refTime, 8, nil); len(got) != 0 {
+		t.Errorf("empty portfolio returned %d results", len(got))
 	}
 }

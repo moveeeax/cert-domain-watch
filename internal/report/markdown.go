@@ -21,6 +21,10 @@ type Options struct {
 	Agency string
 	// GeneratedAt is the timestamp in the header; pass a fixed value in tests.
 	GeneratedAt time.Time
+	// Client, when set, makes this a single-client report: the title names
+	// the client, the agency moves to a "Prepared by" line, and results for
+	// any other client are dropped so the file is safe to forward.
+	Client string
 }
 
 // Markdown renders a full audit for a set of results, grouped by client and
@@ -28,26 +32,41 @@ type Options struct {
 func Markdown(results []watch.Result, opts Options) string {
 	var b strings.Builder
 
-	title := "Domain & certificate audit"
-	if opts.Agency != "" {
-		title += " — " + opts.Agency
+	generated := opts.GeneratedAt.UTC().Format("2006-01-02 15:04")
+	if opts.Client != "" {
+		var own []watch.Result
+		for _, r := range results {
+			if clientOf(r) == opts.Client {
+				own = append(own, r)
+			}
+		}
+		results = own
+		fmt.Fprintf(&b, "# Domain & certificate audit — %s\n\n", opts.Client)
+		if opts.Agency != "" {
+			fmt.Fprintf(&b, "Prepared by %s. ", opts.Agency)
+		}
+		fmt.Fprintf(&b, "Generated %s UTC by cert-domain-watch.\n\n", generated)
+	} else {
+		title := "Domain & certificate audit"
+		if opts.Agency != "" {
+			title += " — " + opts.Agency
+		}
+		fmt.Fprintf(&b, "# %s\n\n", title)
+		fmt.Fprintf(&b, "Generated %s UTC by cert-domain-watch.\n\n", generated)
 	}
-	fmt.Fprintf(&b, "# %s\n\n", title)
-	fmt.Fprintf(&b, "Generated %s UTC by cert-domain-watch.\n\n",
-		opts.GeneratedAt.UTC().Format("2006-01-02 15:04"))
 
 	if len(results) == 0 {
 		b.WriteString("No domains were checked.\n")
 		return b.String()
 	}
 
-	writeSummary(&b, results)
+	writeSummary(&b, results, opts.Client == "")
 	writeClients(&b, results)
 	writeCoverageNotes(&b, results)
 	return b.String()
 }
 
-func writeSummary(b *strings.Builder, results []watch.Result) {
+func writeSummary(b *strings.Builder, results []watch.Result, countClients bool) {
 	counts := map[finding.Severity]int{}
 	clients := map[string]bool{}
 	for _, r := range results {
@@ -58,7 +77,9 @@ func writeSummary(b *strings.Builder, results []watch.Result) {
 	}
 
 	b.WriteString("## Summary\n\n")
-	fmt.Fprintf(b, "- Clients: **%d**\n", len(clients))
+	if countClients {
+		fmt.Fprintf(b, "- Clients: **%d**\n", len(clients))
+	}
 	fmt.Fprintf(b, "- Domains checked: **%d**\n", len(results))
 	fmt.Fprintf(b, "- Critical findings: **%d**\n", counts[finding.Critical])
 	fmt.Fprintf(b, "- Warnings: **%d**\n", counts[finding.Warning])
